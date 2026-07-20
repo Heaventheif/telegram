@@ -627,11 +627,24 @@ def _cleanup_file(path: str):
 # ══════════════════════════════════════════════
 # /start و /plugins (أوامر أساسية مدمجة)
 # ══════════════════════════════════════════════
+_MD_SPECIAL_RE = re.compile(r'([_*`\[])')
+
+def _md_escape(text: str) -> str:
+    """يهرّب المحارف الخاصة بصيغة Markdown القديمة (parse_mode='Markdown')
+    داخل نص ديناميكي (مثل اسم/وصف plugin) قبل تضمينه في رسالة منسَّقة.
+    بدون هذا، أي وصف يحتوي على '_' غير متوازن (مثل '@vreden/youtube_scraper')
+    يجعل تيليجرام يرفض الرسالة بالكامل بخطأ:
+    'Bad Request: can't parse entities' — لأن تيليجرام يعتبره بداية entity
+    مائل بلا نهاية مطابقة. تيليجرام يدعم '\\' للتهريب في هذه الصيغة تحديداً
+    (راجع توثيق Bot API — Markdown legacy)."""
+    return _MD_SPECIAL_RE.sub(r'\\\1', text or "")
+
+
 async def cmd_start(msg: dict):
     chat_id = msg["chat"]["id"]
     plugins = get_plugins()
     sites   = "\n".join(
-        f"   `•` *{p['name']}* — {p['description'] or ', '.join(p['domains'][:3])}"
+        f"   `•` *{_md_escape(p['name'])}* — {_md_escape(p['description'] or ', '.join(p['domains'][:3]))}"
         for p in plugins
     )
     text = (
