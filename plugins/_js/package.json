@@ -1,0 +1,10 @@
+{
+  "name": "bun-workers",
+  "private": true,
+  "version": "1.0.0",
+  "description": "عمّال Bun المشتركين: يوتيوب (@vreden/youtube_scraper) وتفريغ النص (groq-sdk) — bun install يشغَّل مرة عبر setup() في plugins/youtube.py",
+  "dependencies": {
+    "@vreden/youtube_scraper": "^1.2.9",
+    "groq-sdk": "^1.3.0"
+  }
+}

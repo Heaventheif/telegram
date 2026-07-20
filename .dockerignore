@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.git/
+.env
+node_modules/
+plugins/_js/node_modules/
+*.db

@@ -1,0 +1,35 @@
+# ══════════════════════════════════════════════════════════════
+# docker-compose.yml — تشغيل محلي/إنتاجي بأمر واحد
+#
+# الاستخدام الأساسي (نسخة واحدة من البوت، كاش SQLite محلي):
+#   docker compose up -d --build
+#
+# لتفعيل Redis كطبقة كاش مشتركة (مفيد فقط عند تشغيل عدة نسخ):
+#   1) أضف REDIS_URL=redis://redis:6379/0 إلى .env
+#   2) docker compose --profile redis up -d --build
+# ══════════════════════════════════════════════════════════════
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${PORT:-10000}:${PORT:-10000}"
+    volumes:
+      # يحافظ على قاعدة كاش SQLite بين إعادة تشغيل الحاوية
+      - bot_cache:/app/data
+    environment:
+      CACHE_DB_PATH: /app/data/media_cache.db
+
+  # اختياري — فعّله فقط عبر: docker compose --profile redis up -d
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["redis"]
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--save", "60", "1"]
+
+volumes:
+  bot_cache:
+  redis_data:
