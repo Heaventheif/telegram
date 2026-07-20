@@ -74,6 +74,9 @@ class CacheBackend:
     async def close(self) -> None:
         raise NotImplementedError
 
+    async def clear_all(self) -> int:
+        raise NotImplementedError
+
 
 # ══════════════════════════════════════════════
 # 🗄️ SQLite — الافتراضي، بدون بنية تحتية خارجية
@@ -131,6 +134,16 @@ class SQLiteCache(CacheBackend):
         if self._db:
             await self._db.close()
 
+    async def clear_all(self) -> int:
+        """يمسح كل مدخلات الكاش — يُستخدم عبر أمر إدارة محمي (/clear_cache).
+        يرجع عدد المدخلات المحذوفة."""
+        cur = await self._db.execute("SELECT COUNT(*) FROM media_cache")
+        row = await cur.fetchone()
+        count = row[0] if row else 0
+        await self._db.execute("DELETE FROM media_cache")
+        await self._db.commit()
+        return count
+
 
 # ══════════════════════════════════════════════
 # 🚀 Redis — اختياري، لتوسّع أفقي متعدد النسخ
@@ -166,6 +179,15 @@ class RedisCache(CacheBackend):
     async def close(self) -> None:
         if self._r:
             await self._r.aclose()
+
+    async def clear_all(self) -> int:
+        """يمسح كل مفاتيح الكاش (mediacache:*) عبر SCAN بدل KEYS (لا يحجب
+        خادم Redis المشترك). يرجع عدد المفاتيح المحذوفة."""
+        count = 0
+        async for key in self._r.scan_iter(match="mediacache:*"):
+            await self._r.delete(key)
+            count += 1
+        return count
 
 
 # ══════════════════════════════════════════════
@@ -227,3 +249,15 @@ async def close_cache() -> None:
     if _backend:
         await _backend.close()
         _backend = None
+
+
+async def clear_all() -> int:
+    """يمسح كل الكاش يدوياً (أمر إدارة محمي) — يرجع عدد المدخلات المحذوفة،
+    أو -1 إن كان الكاش مُعطَّلاً أصلاً (لا شيء لمسحه)."""
+    if not _enabled or _backend is None:
+        return -1
+    try:
+        return await _backend.clear_all()
+    except Exception:
+        logger.exception("[cache] فشل مسح الكاش بالكامل")
+        raise

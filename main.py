@@ -14,6 +14,7 @@ main.py — ثابت نهائياً، لا يُعدَّل أبداً
 لنفس الرابط بنفس الجودة يُعاد إرساله فوراً من تيليجرام دون تحميل/رفع.
 """
 import os, sys, re, time, asyncio, logging
+from collections import defaultdict
 
 from sanic import Sanic, response as sanic_response
 
@@ -84,6 +85,35 @@ def _cleanup_url_mode():
 # chat_id -> {"url": str, "status_message_id": int, "ts": float}
 # بانتظار رد نصي بصيغة "البداية-النهاية" بعد اختيار "تنزيل جزء محدد"
 URL_CLIP_AWAIT = {}
+
+# ══════════════════════════════════════════════
+# 🚦 حماية بسيطة من إغراق الطلبات (rate limiting) — حد أدنى بالثواني
+# (config.RATE_LIMIT_SECONDS) بين كل رسالة/أمر جديد من نفس chat_id.
+# لا يشمل ضغط الأزرار (callback_query) لأنها تتابع طلباً بدأ للتو فعلاً.
+# ══════════════════════════════════════════════
+_last_action_ts = defaultdict(float)
+
+def _is_rate_limited(chat_id: int) -> bool:
+    """يرجع True إذا أرسل chat_id طلباً قبل أقل من RATE_LIMIT_SECONDS —
+    الطلب الحالي يُتجاهل بصمت (بدون رسالة خطأ) لتفادي إغراق تيليجرام نفسه
+    بردود 'انتظر' في حال كان المُرسِل يحاول إغراق البوت فعلاً."""
+    now  = time.time()
+    last = _last_action_ts.get(chat_id, 0.0)
+    if now - last < config.RATE_LIMIT_SECONDS:
+        return True
+    _last_action_ts[chat_id] = now
+    return False
+
+def _cleanup_rate_limit():
+    now   = time.time()
+    stale = now - max(config.RATE_LIMIT_SECONDS, 1) * 20
+    for k in [k for k, ts in _last_action_ts.items() if ts < stale]:
+        _last_action_ts.pop(k, None)
+
+# ══════════════════════════════════════════════
+# 🚫 التحميلات النشطة القابلة للإلغاء (token -> asyncio.Task)
+# ══════════════════════════════════════════════
+DOWNLOAD_TASKS = {}
 
 # ══════════════════════════════════════════════
 # ⌨️ بناء لوحة الأزرار من QualityOption list
@@ -422,6 +452,57 @@ async def _send_result(chat_id: int, dl, status_message_id: int, task: dict, cac
             _cleanup_file(p)
 
 
+# ══════════════════════════════════════════════
+# ⏱️ تحديث دوري لرسالة الحالة أثناء التحميل + زر إلغاء
+# ══════════════════════════════════════════════
+def _cancel_keyboard(token: str) -> dict:
+    return {"inline_keyboard": [[{"text": "❌ إلغاء التحميل", "callback_data": f"cancel|{token}"}]]}
+
+
+async def _progress_ticker(chat_id: int, message_id: int, title: str, label: str,
+                            start_time: float, token: str):
+    """يحدّث رسالة الحالة كل 8 ثوانٍ (أبعد من حد تيليجرام 1 تعديل/ثانية
+    بهامش أمان كبير) لعرض الوقت المنقضي، مع إبقاء زر الإلغاء ظاهراً طوال
+    التحميل. يتوقف تلقائياً عند إلغاء المهمة (تُلغى من المستدعي بمجرد
+    اكتمال التحميل أو إلغائه — راجع handle_choice)."""
+    kb = _cancel_keyboard(token)
+    try:
+        while True:
+            await asyncio.sleep(8)
+            elapsed = int(time.time() - start_time)
+            await bot.edit_message_text(
+                chat_id, message_id,
+                f"⏳ جاري تحميل «{title}» — {label} ... ({elapsed}s)\nيمكنك الإلغاء بالأسفل 👇",
+                reply_markup=kb,
+            )
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.warning("[progress] فشل تحديث رسالة التقدم — سيُتابَع التحميل بصمت")
+
+
+async def handle_cancel_download(callback_query: dict):
+    """يلغي تحميلاً نشطاً عبر إلغاء الـ asyncio.Task المرتبط بالتوكن.
+    ⚠️ ملاحظة: عمليات subprocess الخارجية (yt-dlp/ffmpeg/bun) التي بدأت
+    فعلاً قد تكمل تنفيذها في الخلفية حتى تنتهي من تلقاء نفسها؛ الإلغاء
+    يوقف انتظار المستخدم ويحرر الـ semaphore فور عودة التحكم لنقطة await
+    التالية، وهو ما يكفي لغرض تجربة المستخدم (عدم الانتظار بلا داعٍ)."""
+    data = callback_query.get("data") or ""
+    try:
+        _, token = data.split("|", 1)
+    except ValueError:
+        await bot.answer_callback_query(callback_query["id"], "⚠️ طلب غير صالح.", show_alert=True)
+        return
+
+    task = DOWNLOAD_TASKS.get(token)
+    if not task or task.done():
+        await bot.answer_callback_query(callback_query["id"], "⌛ لا يوجد تحميل نشط لإلغائه.", show_alert=True)
+        return
+
+    task.cancel()
+    await bot.answer_callback_query(callback_query["id"], "🚫 جاري إلغاء التحميل...")
+
+
 async def handle_choice(callback_query: dict):
     msg     = callback_query["message"]
     chat_id = msg["chat"]["id"]
@@ -461,21 +542,45 @@ async def handle_choice(callback_query: dict):
             logger.warning(f"[cache] file_id مخزَّن لم يعد صالحاً (token={token}, key={key}) — تحميل عادي بدلاً منه")
             # نتابع لمسار التحميل العادي بدل فشل الطلب بالكامل
 
-    await bot.edit_message_text(chat_id, msg["message_id"], f"⏳ جاري تحميل «{task['title']}» — {option.label} ...")
+    kb_cancel = _cancel_keyboard(token)
+    await bot.edit_message_text(
+        chat_id, msg["message_id"],
+        f"⏳ جاري تحميل «{task['title']}» — {option.label} ...\nيمكنك الإلغاء بالأسفل 👇",
+        reply_markup=kb_cancel,
+    )
 
     plugin_entry = next((p for p in get_plugins() if p["name"] == task["plugin"]), None)
     if not plugin_entry:
         await bot.edit_message_text(chat_id, msg["message_id"], "❌ الـ plugin الأصلي لم يُعثر عليه، أعد إرسال الرابط.")
         return
 
-    t_dl_start = time.time()
+    t_dl_start    = time.time()
+    progress_task = None
     try:
         # 🚦 حد أقصى للتحميلات المتزامنة — يمنع ذروة استهلاك رام/قرص
         async with get_download_semaphore():
-            dl = await plugin_entry["download"](
-                url=task["url"],
-                choice={"key": key, "option": option, "extra": task["extra"]},
+            # ⬇️ نُشغّل download() كـ Task مستقل (بدل await مباشر) حتى يمكن
+            # إلغاؤه من handle_cancel_download عبر زر "❌ إلغاء التحميل"
+            dl_task = asyncio.ensure_future(
+                plugin_entry["download"](
+                    url=task["url"],
+                    choice={"key": key, "option": option, "extra": task["extra"]},
+                )
             )
+            DOWNLOAD_TASKS[token] = dl_task
+            progress_task = asyncio.ensure_future(
+                _progress_ticker(chat_id, msg["message_id"], task["title"], option.label, t_dl_start, token)
+            )
+            try:
+                dl = await dl_task
+            finally:
+                DOWNLOAD_TASKS.pop(token, None)
+                if not progress_task.done():
+                    progress_task.cancel()
+    except asyncio.CancelledError:
+        await bot.edit_message_text(chat_id, msg["message_id"], "🚫 تم إلغاء التحميل بناءً على طلبك.")
+        PENDING.pop(token, None)
+        return
     except Exception as e:
         logger.exception(f"[{task['plugin']}] download فشل | url={task['url']} | chat={chat_id}")
         await bot.edit_message_text(chat_id, msg["message_id"], f"❌ فشل التحميل:\n{str(e)[:300]}")
@@ -559,7 +664,24 @@ async def cmd_plugins(msg: dict):
         lines.append(f"{status} {name}: {info.get('description') or info.get('reason','')}")
     await bot.send_message(chat_id, "🔌 الـ Plugins:\n\n" + "\n".join(lines))
 
-_BUILTIN_COMMANDS = {"start": cmd_start, "plugins": cmd_plugins}
+async def cmd_clear_cache(msg: dict):
+    """أمر إدارة محمي — يمسح كل كاش الوسائط (media_cache) يدوياً.
+    مخصص لـ chat_id مُدرَجة في config.ADMIN_CHAT_IDS فقط."""
+    chat_id = msg["chat"]["id"]
+    if chat_id not in config.ADMIN_CHAT_IDS:
+        await bot.send_message(chat_id, "⛔ هذا الأمر مخصص للإدارة فقط.")
+        return
+    try:
+        count = await cache.clear_all()
+    except Exception as e:
+        await bot.send_message(chat_id, f"❌ فشل مسح الكاش:\n{str(e)[:200]}")
+        return
+    if count == -1:
+        await bot.send_message(chat_id, "⏸️ الكاش مُعطَّل أصلاً (CACHE_ENABLED=false) — لا شيء لمسحه.")
+    else:
+        await bot.send_message(chat_id, f"🧹 تم مسح الكاش بنجاح — {count} مدخل محذوف.")
+
+_BUILTIN_COMMANDS = {"start": cmd_start, "plugins": cmd_plugins, "clear_cache": cmd_clear_cache}
 
 # ══════════════════════════════════════════════
 # 🧭 توجيه التحديثات الخام إلى المعالج المناسب
@@ -575,6 +697,8 @@ async def _dispatch_update(update: dict):
                 await handle_search_choice(cq)
             elif data.startswith("mode|"):
                 await handle_url_mode_choice(cq)
+            elif data.startswith("cancel|"):
+                await handle_cancel_download(cq)
             else:
                 # بادئات أخرى (مثل mtool| من plugins/media_tools.py) تُوجَّه لأي
                 # extra_handler من الـ plugins يقبلها عبر فلتره الخاص
@@ -590,6 +714,10 @@ async def _dispatch_update(update: dict):
         if "message" not in update:
             return
         msg = update["message"]
+
+        chat_id_rl = (msg.get("chat") or {}).get("id")
+        if chat_id_rl is not None and _is_rate_limited(chat_id_rl):
+            return  # 🚦 طلب متكرر بسرعة كبيرة من نفس chat_id — يُتجاهل بصمت
 
         if is_command(msg):
             name = command_name(msg)
@@ -642,6 +770,7 @@ async def _periodic_cleanup():
             _cleanup()
             _cleanup_search()
             _cleanup_url_mode()
+            _cleanup_rate_limit()
         except Exception:
             logger.exception("[cleanup] فشل التنظيف الدوري")
 
