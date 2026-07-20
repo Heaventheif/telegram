@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 
 import aiohttp
 from config import config
@@ -34,7 +35,7 @@ _YT2_BASE  = config.YT_API_2
 # Bun worker — plugins/_js/youtube_worker.js
 _JS_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_js")
 _JS_WORKER = os.path.join(_JS_DIR, "youtube_worker.js")
-_BUN_BIN   = os.getenv("BUN_BIN", "bun")
+_BUN_BIN   = shutil.which(os.getenv("BUN_BIN", "bun")) or os.getenv("BUN_BIN", "bun")
 
 DOCKERFILE_APT = ["curl", "unzip"]
 DOCKERFILE_RUN = [

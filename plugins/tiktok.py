@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 
 from config import config
@@ -25,7 +26,7 @@ UPLOAD_LIMIT = config.UPLOAD_LIMIT
 
 _JS_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_js")
 _JS_WORKER = os.path.join(_JS_DIR, "tiktok_worker.js")
-_BUN_BIN   = os.getenv("BUN_BIN", "bun")
+_BUN_BIN   = shutil.which(os.getenv("BUN_BIN", "bun")) or os.getenv("BUN_BIN", "bun")
 
 # لا تبعيات npm لهذا الـ worker (fetch/AbortController/Bun.sleep مدمجة في
 # Bun) — يحتاج فقط ثنائي Bun نفسه، لذا نصرّح بتثبيته هنا أيضاً (بشكل

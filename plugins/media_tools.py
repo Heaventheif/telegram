@@ -19,7 +19,7 @@ ffmpeg محلياً (نفس الطريقة المستخدمة في plugin_loader
 trim_media_by_time() و parse_time_range() معروضتان أيضاً للاستيراد من
 main.py لإعادة استخدامهما في مسار "تنزيل جزء من رابط" (راجع main.py).
 """
-import os, re, json, time, asyncio, logging, tempfile
+import os, re, json, time, asyncio, logging, tempfile, shutil
 from telegram_api import is_recognizable_media
 import cache
 from config import config
@@ -36,7 +36,7 @@ _TTL = config.PENDING_TTL_MIN * 60
 # لو كل بلجن ثبّت تبعياته بنفسه.
 _JS_DIR             = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_js")
 _TRANSCRIBE_WORKER  = os.path.join(_JS_DIR, "transcribe_worker.js")
-_BUN_BIN            = os.getenv("BUN_BIN", "bun")
+_BUN_BIN            = shutil.which(os.getenv("BUN_BIN", "bun")) or os.getenv("BUN_BIN", "bun")
 _GROQ_API_KEY       = config.GROQ_API_KEY
 
 # token -> {"msg": dict, "ts": float}                 (الوسائط المُستلَمة بانتظار اختيار المستخدم)
@@ -165,13 +165,21 @@ def format_seconds(s: float) -> str:
 def parse_time_range(text: str):
     """يحلّل نصاً مثل '0:30-1:15' إلى (start_seconds, end_seconds) — صيغة
     mm:ss فقط لكل من البداية والنهاية. يرمي ValueError إن كانت الصيغة غير
-    صالحة أو start >= end."""
+    صالحة، أو start >= end، أو تجاوزت المدة الحد الأقصى المسموح
+    (MAX_CLIP_DURATION_SECONDS) — يمنع طلب قص جزء طويل جداً يستهلك
+    CPU/RAM/قرص بلا داعٍ (مثلاً '0:00-999:99')."""
     parts = [p for p in _SEP_RE.split((text or "").strip(), maxsplit=1) if p != ""]
     if len(parts) != 2:
         raise ValueError("استخدم صيغة: البداية-النهاية بصيغة mm:ss، مثال: 0:30-1:15")
     start, end = _to_seconds(parts[0]), _to_seconds(parts[1])
     if start < 0 or end <= start:
         raise ValueError("يجب أن تكون نهاية المقطع بعد بدايته")
+    max_dur = config.MAX_CLIP_DURATION_SECONDS
+    if max_dur and (end - start) > max_dur:
+        raise ValueError(
+            f"الجزء المطلوب طويل جداً ({format_seconds(end - start)}) — "
+            f"الحد الأقصى المسموح {format_seconds(max_dur)}"
+        )
     return start, end
 
 
